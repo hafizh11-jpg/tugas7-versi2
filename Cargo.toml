@@ -1,0 +1,11 @@
+[package]
+name = "tugas7-versi2"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = "0.28"
+egui = "0.28"
+tokio = { version = "1", features = ["full"] }
+redis = { version = "0.25", features = ["tokio-comp"] }
+chrono = "0.4"
