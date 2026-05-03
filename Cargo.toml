@@ -4,8 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# GUI Framework immediate-mode untuk aplikasi desktop native
 eframe = "0.28"
 egui = "0.28"
+
+# Async runtime untuk konkurensi tinggi (tokio tasks)
 tokio = { version = "1", features = ["full"] }
+
+# Redis client dengan dukungan async/await
 redis = { version = "0.25", features = ["tokio-comp"] }
+
+# Utility tanggal/waktu (opsional, untuk logging)
 chrono = "0.4"
