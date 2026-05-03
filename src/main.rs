@@ -153,6 +153,119 @@ impl eframe::App for MyApp {
 }
 
 // ============================================================================
+// [FUNGSI PROSES PEMESANAN PER USER] - Async dengan Return Result
+// ============================================================================
+/// Fungsi ini menangani logika pemesanan untuk SATU user.
+/// Return type: Result<(), Box<dyn Error + Send + Sync>>
+/// - Ok(())  = proses selesai tanpa error
+/// - Err(e)  = terjadi error (misal: Redis down)
+async fn proses_pemesanan(
+    state: Arc<Mutex<AppState>>,
+    client: Client,
+    gunakan_lock: bool,
+    user_id: String,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    
+    tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+
+    if gunakan_lock {
+        // ============================================================
+        // 🔒 REDIS DISTRIBUTED LOCK (SET NX PX) - Tahap 2
+        // ============================================================
+        // Wait/P Operation: Coba ambil kunci dengan SET NX PX
+        let mut conn = client.get_multiplexed_tokio_connection().await?;
+        let lock_key = "ticket_mutex_lock";
+        let ttl_ms = 3000; // Timeout 3 detik untuk mencegah deadlock
+
+        // Retry loop: terus coba sampai lock berhasil diambil
+        let mut locked = false;
+        while !locked {
+            let res: Option<String> = redis::cmd("SET")
+                .arg(lock_key)
+                .arg(&user_id)
+                .arg("NX")  // Only set if Not eXists
+                .arg("PX")  // Set expiry in milliseconds
+                .arg(ttl_ms)
+                .query_async(&mut conn)
+                .await?;
+            
+            if res == Some("OK".to_string()) {
+                locked = true; // ✅ Lock berhasil diambil
+            } else {
+                // 🔁 Lock sedang dipegang proses lain, tunggu sebentar lalu retry
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+        }
+
+        // ============================================================
+        // 🎯 CRITICAL SECTION (DIPROTEKSI REDIS LOCK) - Tahap 3
+        // ============================================================
+        // Hanya 1 proses yang boleh masuk ke blok ini pada satu waktu
+        {
+            let mut s = state.lock().unwrap();
+            if s.sisa_tiket > 0 {
+                // ✅ Stok masih ada, kurangi 1
+                s.sisa_tiket -= 1;
+                s.terjual += 1;
+                // Mutex otomatis dilepas saat scope berakhir (RAII)
+            }
+        } // 🔓 std::sync::Mutex dilepas di sini
+
+        // Catat log (di luar critical section agar tidak memperlambat)
+        {
+            let mut s_log = state.lock().unwrap();
+            if s_log.sisa_tiket >= 0 {
+                s_log.logs.push(format!("🔒 [{}] Tiket dibeli. Sisa: {}", user_id, s_log.sisa_tiket));
+            } else {
+                s_log.logs.push(format!("❌ [{}] Gagal: Stok habis.", user_id));
+            }
+            // Batasi ukuran log agar tidak makan memori
+            if s_log.logs.len() > 300 { 
+                s_log.logs.remove(0); 
+            }
+        }
+
+        // ============================================================
+        // 🔓 Signal/V Operation: LEPAS KUNCI
+        // ============================================================
+        // Hapus key lock agar proses lain bisa masuk critical section
+        let _: () = redis::cmd("DEL").arg(lock_key).query_async(&mut conn).await?;
+
+    } else {
+        // ============================================================
+        // ⚠️ TANPA LOCK - Simulasi Race Condition (Tahap 1)
+        // ============================================================
+        // Banyak thread membaca `sisa_tiket` bersamaan → stale data
+        // Lalu sama-sama menulis nilai usang → overbooking / sisa negatif
+        {
+            let mut s = state.lock().unwrap();
+            if s.sisa_tiket > 0 {
+                let current = s.sisa_tiket;  // 📖 READ (bisa dibaca thread lain juga)
+                
+                // 🕐 Simulasi delay / context switch (memperjelas race condition)
+                tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
+                
+                s.sisa_tiket = current - 1;  // ✍️ WRITE (menimpa dengan nilai usang!)
+                s.terjual += 1;
+                // ⚠️ Di sinilah Race Condition terjadi: 2 thread baca nilai sama,
+                // lalu sama-sama menulis current-1 → stok berkurang hanya 1 padahal 2 tiket terjual
+            }
+        }
+
+        // Catat log
+        {
+            let mut s_log = state.lock().unwrap();
+            s_log.logs.push(format!("⚡ [{}] Terjual (No Lock). Sisa: {}", user_id, s_log.sisa_tiket));
+            if s_log.logs.len() > 300 { 
+                s_log.logs.remove(0); 
+            }
+        }
+    }
+
+    Ok(()) // ✅ Fungsi selesai sukses
+}
+
+// ============================================================================
 // [LOGIKA SIMULASI UTAMA]
 // ============================================================================
 async fn simulasi_tiket(
@@ -167,102 +280,43 @@ async fn simulasi_tiket(
     let start = Instant::now();
     let mut handles = Vec::new();
 
+    // [Tahap 1] Spawn 100-1000 request konkuren
     for id in 1..=jumlah_request {
         let state_clone = Arc::clone(&state);
         let client_clone = client.clone();
-        let lock_flag = gunakan_lock;
         let user_id = format!("User-{:04}", id);
 
-        // ⚠️ PERBAIKAN: async block sekarang mengembalikan Result
-        let handle = tokio::spawn(async move -> Result<(), Box<dyn Error + Send + Sync>> {
-            tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
-
-            if lock_flag {
-                // ============================================================
-                // 🔒 REDIS DISTRIBUTED LOCK (SET NX PX)
-                // ============================================================
-                // PERBAIKAN: menggunakan get_multiplexed_tokio_connection()
-                let mut conn = client_clone.get_multiplexed_tokio_connection().await?;
-                let lock_key = "ticket_mutex_lock";
-                let ttl_ms = 3000;
-
-                let mut locked = false;
-                while !locked {
-                    let res: Option<String> = redis::cmd("SET")
-                        .arg(lock_key)
-                        .arg(&user_id)
-                        .arg("NX")
-                        .arg("PX")
-                        .arg(ttl_ms)
-                        .query_async(&mut conn)
-                        .await?;
-                    
-                    if res == Some("OK".to_string()) {
-                        locked = true;
-                    } else {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                    }
-                }
-
-                // 🎯 CRITICAL SECTION (DIPROTEKSI)
-                let mut s = state_clone.lock().unwrap();
-                if s.sisa_tiket > 0 {
-                    s.sisa_tiket -= 1;
-                    s.terjual += 1;
-                    drop(s);
-                    
-                    let mut s_log = state_clone.lock().unwrap();
-                    s_log.logs.push(format!("🔒 [{}] Tiket dibeli. Sisa: {}", user_id, s_log.sisa_tiket).to_string());
-                    if s_log.logs.len() > 300 { s_log.logs.remove(0); }
-                } else {
-                    drop(s);
-                    let mut s_log = state_clone.lock().unwrap();
-                    s_log.logs.push(format!("❌ [{}] Gagal: Stok habis.", user_id).to_string());
-                    if s_log.logs.len() > 300 { s_log.logs.remove(0); }
-                }
-
-                // 🔓 RELEASE LOCK
-                let _: () = redis::cmd("DEL").arg(lock_key).query_async(&mut conn).await?;
-
-            } else {
-                // ⚠️ TANPA LOCK (RACE CONDITION)
-                let mut s = state_clone.lock().unwrap();
-                if s.sisa_tiket > 0 {
-                    let current = s.sisa_tiket;
-                    tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
-                    s.sisa_tiket = current - 1;
-                    s.terjual += 1;
-                    
-                    drop(s);
-                    let mut s_log = state_clone.lock().unwrap();
-                    s_log.logs.push(format!("⚡ [{}] Terjual (No Lock). Sisa: {}", user_id, s_log.sisa_tiket).to_string());
-                    if s_log.logs.len() > 300 { s_log.logs.remove(0); }
-                } else {
-                    drop(s);
-                }
-            }
-            Ok(()) // ⚠️ PERBAIKAN: Return Ok di akhir async block
+        // ✅ PERBAIKAN: Panggil fungsi terpisah yang return Result
+        let handle = tokio::spawn(async move {
+            // Ignor error per-user agar satu user gagal tidak menghentikan semua
+            let _ = proses_pemesanan(state_clone, client_clone, gunakan_lock, user_id).await;
         });
         handles.push(handle);
     }
 
+    // Tunggu semua task selesai
     for h in handles {
         let _ = h.await;
     }
 
+    // [Tahap 3] Verifikasi Konsistensi Data
     let duration = start.elapsed();
     let mut final_state = state.lock().unwrap();
     final_state.waktu_eksekusi_ms = Some(duration.as_millis() as u64);
     final_state.sedang_berjalan = false;
 
     if final_state.sisa_tiket < 0 {
-        final_state.logs.push(format!("🚨 RACE CONDITION! Sisa: {}", final_state.sisa_tiket).to_string());
+        final_state.logs.push("🚨 RACE CONDITION TERDETEKSI! Sisa tiket negatif.".to_string());
     } else if final_state.sisa_tiket == 0 && final_state.terjual == tiket_awal as i32 {
-        // ⚠️ PERBAIKAN: .to_string() untuk &str -> String
-        final_state.logs.push("✅ KONSISTEN: Semua tiket terjual tepat.".to_string());
+        final_state.logs.push("✅ KONSISTEN: Semua tiket terjual tepat. Tidak ada overbooking.".to_string());
     } else {
         final_state.logs.push("⚠️ Hasil tidak sesuai ekspektasi.".to_string());
     }
+
+    // [Tahap 4] Analisis Performa:
+    // - Tanpa Lock: Lebih cepat (tanpa overhead network Redis), tapi data korup ❌
+    // - Dengan Lock: Sedikit lebih lambat (overhead SET NX + network RTT), tapi data 100% aman ✅
+    // Trade-off: Integritas data > kecepatan murni untuk sistem finansial/tiket
 
     Ok(())
 }
@@ -272,7 +326,6 @@ async fn simulasi_tiket(
 // ============================================================================
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions::default();
-    // ⚠️ PERBAIKAN: Bungkus dengan Ok(...)
     eframe::run_native(
         "Tugas 7 - Rust & Redis Mutex",
         options,
