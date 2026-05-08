@@ -2,8 +2,8 @@
 //! TUGAS #7: Simulasi Race Condition & Redis Distributed Lock/Mutex
 //! ============================================================================
 //!  Problem: Overbooking tiket konser pada High Concurrency
-//! 🛠️ Stack: Rust + egui (GUI) + Redis (Distributed Mutex)
-//! 📚 Mapping: Setiap bagian kode diberi tag [TAHAP 1] s/d [TAHAP 4] sesuai PDF
+//!  Stack: Rust + egui (GUI) + Redis (Distributed Mutex)
+//!  Mapping: Setiap bagian kode diberi tag [TAHAP 1] s/d [TAHAP 4] sesuai PDF
 //! ============================================================================
 
 use eframe::egui;
@@ -82,7 +82,7 @@ impl MyApp {
                 Ok(r) => r,
                 Err(e) => {
                     if let Ok(mut s) = state.lock() {
-                        s.pesan_error = Some(format!("❌ Gagal buat runtime: {}", e));
+                        s.pesan_error = Some(format!(" Gagal buat runtime: {}", e));
                         s.sedang_berjalan = false;
                     }
                     return;
@@ -91,7 +91,7 @@ impl MyApp {
             rt.block_on(async move {
                 if let Err(e) = simulasi_tiket(Arc::clone(&state), use_lock, tiket_awal, req_count, &url).await {
                     if let Ok(mut s) = state.lock() {
-                        s.pesan_error = Some(format!("❌ Error simulasi: {}", e));
+                        s.pesan_error = Some(format!(" Error simulasi: {}", e));
                         s.sedang_berjalan = false;
                     }
                 }
@@ -106,20 +106,20 @@ impl MyApp {
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("🎟️ Tugas #7: Race Condition vs Redis Distributed Lock");
+            ui.heading(" Tugas #7: Race Condition vs Redis Distributed Lock");
             ui.separator();
 
             ui.horizontal(|ui| {
-                ui.label("📦 Stok Tiket Awal:");
+                ui.label(" Stok Tiket Awal:");
                 ui.add(egui::DragValue::new(&mut self.jumlah_tiket_awal).range(10..=1000));
-                ui.label("🔄 Request Konkuren:");
+                ui.label(" Request Konkuren:");
                 ui.add(egui::DragValue::new(&mut self.jumlah_request).range(100..=2000));
             });
 
             ui.horizontal(|ui| {
-                ui.label("🔗 Redis URL:");
+                ui.label(" Redis URL:");
                 ui.text_edit_singleline(&mut self.redis_url);
-                ui.checkbox(&mut self.gunakan_redis_lock, "✅ Aktifkan Redis Mutex (SET NX PX)");
+                ui.checkbox(&mut self.gunakan_redis_lock, " Aktifkan Redis Mutex (SET NX PX)");
             });
 
             ui.separator();
@@ -128,13 +128,13 @@ impl eframe::App for MyApp {
                 let sedang_berjalan = {
                     let state = self.state.lock().unwrap();
                     state.sedang_berjalan
-                }; // ✅ FIX: Hapus has_error yang tidak dipakai
+                }; //  FIX: Hapus has_error yang tidak dipakai
                 
                 if ui.add_enabled(!sedang_berjalan, egui::Button::new("🚀 Mulai Simulasi")).clicked() {
                     self.jalankan_simulasi();
                 }
                 
-                if ui.button("🔄 Reset Log").clicked() {
+                if ui.button(" Reset Log").clicked() {
                     if let Ok(mut s) = self.state.lock() {
                         s.logs.clear();
                         drop(s);
@@ -150,10 +150,10 @@ impl eframe::App for MyApp {
             };
             
             ui.horizontal(|ui| {
-                ui.label(format!("📦 Sisa Tiket: {}", sisa));
-                ui.label(format!("✅ Terjual: {}", terjual));
+                ui.label(format!(" Sisa Tiket: {}", sisa));
+                ui.label(format!(" Terjual: {}", terjual));
                 if let Some(ms) = waktu {
-                    ui.label(format!("⏱️ Waktu: {} ms", ms));
+                    ui.label(format!(" Waktu: {} ms", ms));
                 }
                 if let Some(e) = &err {
                     ui.colored_label(egui::Color32::RED, e);
@@ -161,7 +161,7 @@ impl eframe::App for MyApp {
             });
 
             ui.separator();
-            ui.label("📜 Log Eksekusi:");
+            ui.label(" Log Eksekusi:");
             
             let logs_snapshot = {
                 let state = self.state.lock().unwrap();
@@ -229,7 +229,7 @@ async fn proses_pemesanan(
 
         let log_msg = {
             let s = state.lock().unwrap();
-            format!("🔒 [{}] Tiket dibeli. Sisa: {}", user_id, s.sisa_tiket)
+            format!(" [{}] Tiket dibeli. Sisa: {}", user_id, s.sisa_tiket)
         };
         {
             let mut s_log = state.lock().unwrap();
@@ -262,7 +262,7 @@ async fn proses_pemesanan(
                 }
             }
             
-            let log_msg = format!("⚡ [{}] Terjual (No Lock). Sisa: {}", user_id, {
+            let log_msg = format!(" [{}] Terjual (No Lock). Sisa: {}", user_id, {
                 let s = state.lock().unwrap(); s.sisa_tiket
             });
             {
@@ -311,22 +311,22 @@ async fn simulasi_tiket(
 
     // [TAHAP 3] Verifikasi Konsistensi Data
     let duration = start.elapsed();
-    let mut final_state = state.lock().unwrap();  // ✅ FIX: Ganti 'final' jadi 'final_state'
+    let mut final_state = state.lock().unwrap();  //  FIX: Ganti 'final' jadi 'final_state'
     final_state.waktu_eksekusi_ms = Some(duration.as_millis() as u64);
     final_state.sedang_berjalan = false;
 
     if final_state.sisa_tiket < 0 {
-        final_state.logs.push("🚨 [TAHAP 1] RACE CONDITION! Sisa negatif (overbooking).".to_string());
+        final_state.logs.push(" [TAHAP 1] RACE CONDITION! Sisa negatif (overbooking).".to_string());
     } else if final_state.sisa_tiket == 0 && final_state.terjual == tiket_awal as i32 {
-        final_state.logs.push("✅ [TAHAP 3] KONSISTEN: Semua tiket terjual tepat.".to_string());
+        final_state.logs.push(" [TAHAP 3] KONSISTEN: Semua tiket terjual tepat.".to_string());
     } else {
-        final_state.logs.push("⚠️ Hasil tidak sesuai ekspektasi.".to_string());
+        final_state.logs.push(" Hasil tidak sesuai ekspektasi.".to_string());
     }
 
     // [TAHAP 4] Analisis Performa:
-    // Tanpa Lock: Cepat (~10-20ms) tapi data korup ❌
+    // Tanpa Lock: Cepat (~10-20ms) tapi data korup 
     // Dengan Lock: Lebih lambat (~300-600ms) karena overhead network Redis + retry loop, 
-    // tapi menjamin integritas data 100% ✅
+    // tapi menjamin integritas data 100% 
 
     Ok(())
 }
@@ -336,7 +336,7 @@ async fn simulasi_tiket(
 // ============================================================================
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions::default();
-    std::panic::set_hook(Box::new(|p| eprintln!("🚨 Panic: {}", p)));
+    std::panic::set_hook(Box::new(|p| eprintln!(" Panic: {}", p)));
     
     eframe::run_native(
         "Tugas 7 - Rust & Redis Mutex",
