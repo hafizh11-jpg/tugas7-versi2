@@ -1,1 +1,1 @@
-tugas mk sistem paralel dan terdistribusi
+Tugas MK Sistem Paralel dan Terdistribusi
